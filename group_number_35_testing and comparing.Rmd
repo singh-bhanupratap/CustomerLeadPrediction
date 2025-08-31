@@ -1,0 +1,521 @@
+---
+title: "Group Assessment AiP"
+output: html_document
+date: "2023-11-07"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(caret)
+library(FSelector)
+library(performanceEstimation)
+library(VIM)
+library(C50)
+library(e1071)
+library(party)
+library(ROSE)
+library(randomForest)
+library(randomForestSRC)
+library(pROC)
+library(CustomerScoringMetrics)
+
+
+```
+
+Cleaning up data
+```{r}
+
+data <- read.csv("assignment_data.csv",stringsAsFactors = TRUE)
+
+#check structure
+str(data)
+
+# covert Targer to Factor
+data$Target <- as.factor(data$Target)
+
+#Encoding Column Account_Type & Active & Credit_Product
+data$Account_Type <- recode(data$Account_Type,"Silver" = 1,"Gold" = 2,"Platinum" = 3)
+data$Active <- ifelse(data$Active == "Yes", 1, 0)
+data$Credit_Product <- ifelse(data$Credit_Product  == "Yes", 1, 0)
+#convert into factor
+data[, c("Dependent","Marital_Status", "Credit_Product", "Account_Type", "Active", "Registration")] <- lapply(data[, c("Dependent","Marital_Status", "Credit_Product", "Account_Type", "Active", "Registration")], as.factor)
+
+#remove ID 
+data$ID <- NULL
+
+#re check structure
+str(data)
+
+#check data summary
+summary(data)
+
+#Dependent column have 118 incorrect data -1 
+Error_dependent <- data %>% filter(Dependent == -1)
+table(Error_dependent$Target)
+prop.table(table(Error_dependent$Target))
+
+#Credit_Product have 18268 NAs
+Error_NAs <- data %>% filter(is.na(Credit_Product))
+prop.table(table(Error_NAs$Target))
+table(Error_NAs$Target)
+
+#set to remove all Error
+data_removeall <- data %>% filter(!Dependent == -1 , !is.na(Credit_Product))
+
+# Check Prob of Target 
+prop.table(table(data$Target))
+prop.table(table(data_removeall$Target)) 
+
+```
+
+Hot-Deck Imputation to impute NAs value
+```{r}
+#Apply Hotdeck imputation in Credit Product
+imputenas <- hotdeck(data, variable = c("Credit_Product"))
+imputenas <- filter(imputenas, Dependent != -1)
+summary(imputenas)
+imputenas$Credit_Product_imp <- NULL
+
+#Check proportion of Credit_Product after imputed
+table(data$Credit_Product)
+prop.table(table(data$Credit_Product))
+table(imputenas$Credit_Product)
+prop.table(table(imputenas$Credit_Product))
+
+```
+
+
+Data Partitioning for Remove NA data set
+```{r}
+# Set a seed with 123
+set.seed(123)
+
+# Partition the dataset into training and test sets
+# index keeps the record indices for the training data
+index = createDataPartition(data_removeall$Target, p = 0.7, list = FALSE)
+
+# Generate training and test data
+training = data_removeall[index, ]
+test = data_removeall[-index, ]
+
+#Check if we need to perform data balancing, this set need data balancing
+table(training$Target)
+prop.table(table(training$Target))
+table(data$Target)
+prop.table(table(data$Target))
+```
+
+Data Partitioning for imputed NA data set
+```{r}
+# Partition the imputed dataset into training and test sets
+# index keeps the record indices for the training data
+# Set a seed with 7
+set.seed(7)
+hot_index = createDataPartition(imputenas$Target, p = 0.7, list = FALSE)
+
+# Generate training and test data
+hot_training = imputenas[hot_index, ]
+hot_test = imputenas[-hot_index, ]
+
+#Check if we need to perform data balancing , this set similar to original dataset
+table(hot_training$Target)
+prop.table(table(hot_training$Target))
+
+table(data$Target)
+prop.table(table(data$Target))
+
+```
+
+
+Check Information gain for remove NA data set
+``` {r}
+# Use function information.gain to compute information gain values of the attributes
+
+Weights <- information.gain(Target~.,training)
+
+# add row names as a column to keep them during ordering
+Weights$attr  <- rownames(Weights)
+
+# Let's sort the weights in decreasing order of information gain values.
+# We will use arrange() function 
+Weights <- arrange(Weights, -attr_importance)
+
+# Set Features for attr > 0
+features <- filter(Weights, attr_importance>0)$attr
+
+# Plot the weights
+barplot(Weights$attr_importance, names = Weights$attr, las = 2, ylim = c(0, 0.15))
+
+```
+
+
+Check Information gain for imputed NA data set
+```{r}
+# Use function information.gain to compute information gain values of the attributes
+
+hot_Weights <- information.gain(Target~.,hot_training)
+
+# add row names as a column to keep them during ordering
+hot_Weights$attr  <- rownames(hot_Weights)
+
+# Let's sort the weights in decreasing order of information gain values.
+# We will use arrange() function 
+hot_Weights <- arrange(hot_Weights, -attr_importance)
+
+# Set Features for attr > 0
+hot_features <- filter(hot_Weights, attr_importance>0)$attr
+
+# Plot the weights
+barplot(hot_Weights$attr_importance, names = hot_Weights$attr, las = 2, ylim = c(0, 0.15))
+
+
+```
+
+
+Data Balancing for remove NA set
+```{r}
+
+# aim for approximately 85:15% 
+set.seed(50)
+Smote_training <- smote(Target~.,data = training,perc.over = 1, k = 5,perc.under = 10 )
+prop.table(table(training$Target))
+table(training$Target)
+table(Smote_training$Target)
+prop.table(table(Smote_training$Target))
+
+Smote_training$Age <- as.integer(Smote_training$Age)
+Smote_training$Vintage  <- as.integer(Smote_training$Vintage)
+Smote_training$Years_at_Residence <- as.integer(Smote_training$Years_at_Residence)
+Smote_training$Avg_Account_Balance<- as.integer(Smote_training$Avg_Account_Balance)
+
+```
+
+
+Build model for remove NA data set
+Using training set disregarding the information gain
+
+Logistic Regression model remove NA data set 
+```{r}
+set.seed(5)
+#Create model 
+Target_Model1 <- glm(Target~. , Smote_training, family = "binomial")
+
+#Baseline Accuracy
+prop.table(table(Smote_training$Target))
+ 
+# Predict the class probabilities of test
+Target_Model_pred1 <- predict(Target_Model1, test, type="response")
+
+# Predict the class 
+Target_Model_target1 <- ifelse(Target_Model_pred1 > 0.5, 1, 0)
+
+# Save the predictions as factor variables
+Target_Model_target1 <- as.factor(Target_Model_target1)
+ 
+confusionMatrix(Target_Model_target1, test$Target, positive = "1", mode = "prec_recall")
+
+#probability
+Prob_glm1 <- as.numeric(Target_Model_target1)
+
+```
+
+
+Decision Tree C.50 remove NA data set
+```{r}
+set.seed(55)
+#Decision Tree C50 model
+tree_model1 <- C5.0(Target~., Smote_training)
+predict1_Tree50 <- predict(tree_model1, test)
+confusionMatrix(predict1_Tree50 , test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+prob1_Tree50 <- predict(tree_model1, test, type = "prob")
+
+```
+
+ 
+Decision Tree Ctree remove NA data set
+```{r}
+# Decision Tree ctree Model
+set.seed(555)
+ctree_model1 <- ctree(Target~., Smote_training)
+
+
+ctree_predict1 = predict(ctree_model1, test, type= "response")
+confusionMatrix(ctree_predict1 , test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+prob_Ctree1 <-predict(ctree_model1, test, type= "prob")
+
+```
+
+
+Random Forest remove NA data set
+```{r}
+set.seed(5555)
+model_RF1 <- randomForest(Target~., Smote_training)
+
+prediction_RF1 <- predict(model_RF1, test)
+ 
+confusionMatrix(prediction_RF1, test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+prob_RF1 <- predict(model_RF1, test, type= "prob")
+```
+
+SVM remove NA dataset 
+since it take really long time to run we put this as comment
+remove # infront of {r} to ruin the code
+```#{r}
+# Build an SVM model by using svm() function
+set.seed(55555)
+svm_model1  <- svm(Target~. , data = Smote_training, kernel = "radial", scale = TRUE, probability = TRUE)
+
+# Predict the Test set results
+svm_predict = predict(svm_model1, test)
+ 
+# Confusion matrix
+confusionMatrix(svm_predict1, test$Target, positive = '1', mode= "prec_recall")
+#predict probability
+svm_prob1 = predict(svm_model1, test, probability = TRUE)
+#assign probability
+prob_SVM1 <- attr(svm_prob1, "probabilities")
+```
+ 
+ 
+
+Now we build model with information gain > 0
+
+```{r}
+#Assign modelling data
+#remove NA set
+modellingdata <- Smote_training[features]
+modellingdata$Target <- Smote_training$Target
+
+#imputed NA set
+hot_modellingdata <- hot_training[hot_features]
+hot_modellingdata$Target <- hot_training$Target
+
+```
+
+
+Logistic Regression remove NA dataset information gain > 0
+```{r}
+set.seed(5)
+
+Target_Model <- glm(Target~. , modellingdata, family = "binomial")
+#summary(Target_Model)
+ 
+#Baseline Accuracy
+prop.table(table(Smote_training$Target))
+ 
+# Predict the class probabilities of test
+Target_Model_pred <- predict(Target_Model, test, type="response")
+
+# Predict the class 
+Target_Model_target <- ifelse(Target_Model_pred > 0.5, 1, 0)
+
+# Save the predictions as factor variables
+Target_Model_target <- as.factor(Target_Model_target)
+ 
+confusionMatrix(Target_Model_target, test$Target, positive = "1", mode = "prec_recall")
+
+#probability
+Prob_glm <- as.numeric(Target_Model_target)
+
+```
+
+
+Decision Tree C.50 remove NA data set information gain > 0
+```{r}
+set.seed(55)
+#Decision Tree C50 model
+tree_model <- C5.0(Target~., modellingdata)
+#summary(tree_model)
+predict_Tree50 <- predict(tree_model, test)
+confusionMatrix(predict_Tree50 , test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+prob_Tree50 <- predict(tree_model, test, type = "prob")
+
+```
+
+
+
+Decision Tree Ctree remove NA data set information gain > 0
+```{r}
+# Decision Tree ctree Model
+set.seed(555)
+ctree_model <- ctree(Target~.,modellingdata )
+
+ctree_predict = predict(ctree_model, test, type= "response")
+confusionMatrix(ctree_predict , test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+prob_Ctree <-predict(ctree_model, test, type= "prob")
+
+```
+
+
+Random Forest remove NA data set information gain > 0
+```{r}
+set.seed(5555)
+model_RF <- randomForest(Target~., modellingdata )
+
+prediction_RF <- predict(model_RF, test)
+ 
+confusionMatrix(prediction_RF, test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+prob_RF <- predict(model_RF, test, type= "prob")
+
+```
+
+
+SVM remove NA data set information gain > 0
+since it take really long time to run we put this as comment
+remove # infront of {r} to ruin the code
+```#{r}
+# Build an SVM model by using svm() function
+set.seed(55555)
+svm_model  <- svm(Target~. , data = modellingdata, kernel = "radial", scale = TRUE, probability = TRUE)
+
+
+
+# Predict the Test set results
+svm_predict = predict(svm_model, test)
+ 
+# Confusion matrix
+confusionMatrix(svm_predict, test$Target, positive = '1', mode= "prec_recall")
+
+#predict probability
+svm_prob = predict(svm_model, test, probability = TRUE)
+#assign probability
+prob_SVM <- attr(svm_prob, "probabilities")
+```
+
+
+
+
+
+build model for Imputed NAs set disregarding the information gain
+
+Logistic Regression imputed NA data set
+```{r}
+set.seed(5)
+hot_Target_Model1 <- glm(Target~. , hot_training, family = "binomial")
+ 
+#Baseline Accuracy
+prop.table(table(hot_training$Target))
+ 
+# Predict the class probabilities of test
+hot_Target_Model_pred1 <- predict(hot_Target_Model1, hot_test, type="response")
+
+# Predict the class 
+hot_Target_Model_target1 <- ifelse(hot_Target_Model_pred1 > 0.5, 1, 0)
+
+# Save the predictions as factor variables
+hot_Target_Model_target1 <- as.factor(hot_Target_Model_target1)
+ 
+confusionMatrix(hot_Target_Model_target1, hot_test$Target, positive = "1", mode = "prec_recall")
+
+#probability
+hot_Prob_glm1 <- as.numeric(hot_Target_Model_target1)
+
+```
+
+Decision Tree imputed_NA Data set
+
+C.50imputed_NA Data set
+```{r}
+set.seed(55)
+#Decision Tree C50 model
+hot_tree_model1 <- C5.0(Target~.,hot_training )
+#summary(tree_model)
+hot_predict_Tree50_1 <- predict(hot_tree_model1, hot_test)
+confusionMatrix(hot_predict_Tree50_1 , hot_test$Target, positive='1', mode = "prec_recall")
+
+
+#Assign Probability
+hot_prob_Tree50_1 <- predict(hot_tree_model1, hot_test, type = "prob")
+```
+
+Ctree imputed_NA Data set
+```{r}
+# Decision Tree ctree Model
+set.seed(555)
+hot_ctree_model1 <- ctree(Target~., data=hot_training)
+#print(ctree_model)
+
+hot_ctree_predict1 = predict(hot_ctree_model1, hot_test, type= "response")
+confusionMatrix(hot_ctree_predict1 , hot_test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+hot_prob_Ctree1 <- predict(hot_ctree_model1, hot_test, type = "prob")
+
+```
+
+ Random Forest imputed NA dataset
+```{r}
+set.seed(5555)
+hot_model_RF1 <- randomForest(Target~., hot_training)
+
+hot_prediction_RF1 <- predict(hot_model_RF1 , hot_test)
+ 
+confusionMatrix(hot_prediction_RF1, hot_test$Target, positive='1', mode = "prec_recall")
+
+#Assign Probability
+hot_prob_RF1 <- predict(hot_model_RF1, hot_test, type= "prob")
+
+```
+
+
+SVM for imputed NA dataset 
+since it take really long time to run we put this as comment
+remove # infront of {r} to ruin the code
+```#{r}
+# Build an SVM model by using svm() function
+set.seed(55555)
+hot_svm_model1  <- svm(Target~. , data = hot_training, kernel = "radial", scale = TRUE, probability = TRUE)
+
+hot_svm_model1  <- svm(Target~. , data = hot_RndSVM, kernel = "radial", scale = TRUE, probability = TRUE) 20%
+ 
+# Predict the Test set results
+hot_svm_predict1 = predict(hot_svm_model1, hot_test)
+ 
+# Confusion matrix
+confusionMatrix(hot_svm_predict1, hot_test$Target, positive = '1', mode= "prec_recall")
+
+#predict probability
+hot_svm_prob1 = predict(hot_svm_model1, test, probability = TRUE)
+#assign probability
+hot_prob_SVM1 <- attr(hot_svm_prob1, "probabilities")
+```
+
+
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+
+
+

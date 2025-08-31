@@ -1,0 +1,241 @@
+---
+title: "Final Approach"
+date: "2023-12-01"
+output: html_document
+---
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(FSelector)
+library(performanceEstimation)
+library(VIM)
+library(C50)
+library(e1071)
+library(party)
+library(ROSE)
+library(randomForest)
+library(randomForestSRC)
+library(pROC)
+library(CustomerScoringMetrics)
+```
+
+Cleaning up data
+```{r}
+data <- read.csv("assignment_data.csv",stringsAsFactors = TRUE)
+#check structure
+str(data)
+# covert Targer to Factor
+data$Target <- as.factor(data$Target)
+#Encoding Column Account_Type & Active & Credit_Product
+data$Account_Type <- recode(data$Account_Type,"Silver" = 1,"Gold" = 2,"Platinum" = 3)
+data$Active <- ifelse(data$Active == "Yes", 1, 0)
+data$Credit_Product <- ifelse(data$Credit_Product  == "Yes", 1, 0)
+#convert into factor
+data[, c("Dependent","Marital_Status", "Credit_Product", "Account_Type", "Active", "Registration")] <- lapply(data[, c("Dependent","Marital_Status", "Credit_Product", "Account_Type", "Active", "Registration")], as.factor)
+#remove ID 
+data$ID <- NULL
+#re check structure
+str(data)
+#check data summary
+summary(data)
+```
+
+Hot-Deck Imputation to impute NAs value
+```{r}
+# Set a seed with 123
+#Apply Hotdeck imputation in Credit Product
+set.seed(123)
+imputenas <- hotdeck(data, variable = c("Credit_Product"))
+imputenas <- filter(imputenas, Dependent != -1)
+summary(imputenas)
+imputenas$Credit_Product_imp <- NULL
+#Check proportion of Credit_Product after imputed
+table(data$Credit_Product)
+prop.table(table(data$Credit_Product))
+table(imputenas$Credit_Product)
+prop.table(table(imputenas$Credit_Product))
+```
+
+Data Partitioning for imputed NA data set
+```{r}
+# Partition the imputed dataset into training and test sets
+# index keeps the record indices for the training data
+# Set a seed with 7
+set.seed(7)
+hot_index = createDataPartition(imputenas$Target, p = 0.7, list = FALSE)
+# Generate training and test data
+hot_training = imputenas[hot_index, ]
+hot_test = imputenas[-hot_index, ]
+#Check if we need to perform data balancing , this set similar to original dataset
+table(hot_training$Target)
+prop.table(table(hot_training$Target))
+table(data$Target)
+prop.table(table(data$Target))
+```
+ 
+Check Infomation gain for imputed NA set
+```{r}
+# Use function information.gain to compute information gain values of the attributes
+hot_Weights <- information.gain(Target~.,hot_training)
+# add row names as a column to keep them during ordering
+hot_Weights$attr  <- rownames(hot_Weights)
+# Let's sort the weights in decreasing order of information gain values.
+# We will use arrange() function 
+hot_Weights <- arrange(hot_Weights, -attr_importance)
+# Set Features for attr > 0
+hot_features <- filter(hot_Weights, attr_importance>0)$attr
+# Plot the weights
+barplot(hot_Weights$attr_importance, names = hot_Weights$attr, las = 2, ylim = c(0, 0.15))
+```
+
+
+build model with information gain > 0
+```{r}
+#Assign modelling data
+hot_modellingdata <- hot_training[hot_features]
+hot_modellingdata$Target <- hot_training$Target
+```
+ 
+Information gain >0
+Logistic Regression imputed NA dataset
+```{r}
+set.seed(5)
+hot_Target_Model <- glm(Target~. , hot_modellingdata, family = "binomial")
+#Baseline Accuracy
+prop.table(table(hot_training$Target))
+# Predict the class probabilities of test
+hot_Target_Model_pred <- predict(hot_Target_Model, hot_test, type="response")
+# Predict the class 
+hot_Target_Model_target <- ifelse(hot_Target_Model_pred > 0.5, 1, 0)
+# Save the predictions as factor variables
+hot_Target_Model_target <- as.factor(hot_Target_Model_target)
+confusionMatrix(hot_Target_Model_target, hot_test$Target, positive = "1", mode = "prec_recall")
+#probability
+hot_Prob_glm <- as.numeric(hot_Target_Model_target)
+```
+
+Decision Tree imputed_NA Data set
+C.50imputed_NA Data set Information gain >0
+```{r}
+set.seed(55)
+#Decision Tree C50 model
+hot_tree_model <- C5.0(Target~., hot_modellingdata)
+ 
+hot_predict_Tree50 <- predict(hot_tree_model, hot_test)
+confusionMatrix(hot_predict_Tree50 , hot_test$Target, positive='1', mode = "prec_recall")
+#Assign Probability
+hot_prob_Tree50 <- predict(hot_tree_model, hot_test, type = "prob")
+```
+
+Ctree imputed_NA Data set Information gain >0
+```{r}
+set.seed(555)
+# Decision Tree ctree Model
+hot_ctree_model <- ctree(Target~., data=hot_modellingdata)
+ 
+hot_ctree_predict = predict(hot_ctree_model, hot_test, type= "response")
+confusionMatrix(hot_ctree_predict , hot_test$Target, positive='1', mode = "prec_recall")
+#Assign Probability
+hot_prob_Ctree <- predict(hot_ctree_model, hot_test, type = "prob")
+```
+
+Random Forest imputed NA data set Information gain >0
+```{r}
+set.seed(5555)
+hot_model_RF <- randomForest(Target~., hot_modellingdata)
+hot_prediction_RF <- predict(hot_model_RF, hot_test)
+confusionMatrix(hot_prediction_RF, hot_test$Target, positive='1', mode = "prec_recall")
+#Assign Probability
+hot_prob_RF <- predict(hot_model_RF, hot_test, type= "prob")
+```
+
+ Model Tuning
+```{r}
+set.seed(5555)
+#perform joint hyperparameter tuning using tune function
+tuned_rf <- randomForestSRC::tune(Target~., hot_modellingdata,
+                                  mtryStart = sqrt(ncol(hot_modellingdata)), 
+                                  nodesizeTry = seq(1, 10, by= 2), 
+                                  ntree = 2, 
+                                  stepFactor = 1.25, improve = 0.001)
+#view the results to see the best hyperparameters
+tuned_rf$optimal
+```
+
+```{r}
+#Apply tuning to RF
+set.seed(5555)
+hot_bestRF <- randomForest(Target~., hot_modellingdata, mtry = 12, nodesize = 9)
+hot_RF_tunedpred <- predict(hot_bestRF, hot_test)
+confusionMatrix(hot_RF_tunedpred, hot_test$Target, positive='1', mode = "prec_recall")
+#Assign Probability
+hot_prob_bestRF <- predict(hot_bestRF, hot_test, type= "prob")
+```
+
+SVM imputed NA set information gain > 0 
+since it take really long time to run we put this as comment
+remove # infront of {r} to ruin the code
+since it take really long time to run we put this as comment
+```#{r}
+# Build an SVM model by using svm() function
+set.seed(55555)
+hot_svm_model  <- svm(Target~. , data = hot_modellingdata, kernel = "radial", scale = TRUE, probability = TRUE)
+# Predict the Test set results
+hot_svm_predict = predict(hot_svm_model, hot_test)
+# Confusion matrix
+confusionMatrix(hot_svm_predict, hot_test$Target, positive = '1', mode= "prec_recall") 
+#predict probability
+hot_svm_prob = predict(hot_svm_model, hot_test, probability = TRUE)
+#assign probability
+hot_prob_SVM <- attr(hot_svm_prob , "probabilities")
+ 
+summary(hot_svm_model)
+```
+
+Obtain Prob of each model
+```{r}
+#Use roc function to return some performance metrics
+
+#if SVM is not run remove SVM first to see result of rest of the graph
+
+ROC_hot_glm <- roc(hot_test$Target,hot_Prob_glm)
+ROC_hot_treeC50 <- roc(hot_test$Target,hot_prob_Tree50[,2])
+ROC_hot_RF <- roc(hot_test$Target,hot_prob_RF[,2])
+ROC_hot_SVM <- roc(hot_test$Target,hot_prob_SVM[,2])
+
+#ROC_hot_SVM <- roc(hot_test$Target,hot_prob_SVM[,2])
+#plot imputed set with inforgain >0
+ggroc(list( Random_Forest = ROC_hot_RF, Decision_Tree= ROC_hot_treeC50,
+         Logistic_Regression = ROC_hot_glm,SVM = ROC_hot_SVM ), legacy.axes=TRUE)+ xlab("False Positive Rate") + ylab("True Possitive Rate") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") + ggtitle("ROC Graph") + labs(color = "AI Models")
+```
+
+Area under graph
+```{r}
+(auc_Logistic <- auc(ROC_hot_glm))
+(auc_treeC50 <- auc(ROC_hot_treeC50)) 
+(auc_RF <-auc(ROC_hot_RF))  
+(auc_SVM <- auc(ROC_hot_SVM ))  
+```
+
+cumGains Table
+```{r}
+#information gain chart
+GainTable_LogReg <- cumGainsTable(hot_Prob_glm, hot_test$Target, resolution = 1/100)
+GainTable_Tree <- cumGainsTable(hot_prob_Tree50[,2], hot_test$Target, resolution = 1/100)
+GainTable_RF <- cumGainsTable(hot_prob_RF[,2],hot_test$Target, resolution = 1/100)
+ 
+GainTable_SVM <- cumGainsTable(hot_prob_SVM[,2],hot_test$Target, resolution = 1/100)
+
+plot(GainTable_LogReg[,4], col="red", type="l",    
+xlab="Percentage of test instances", ylab="Percentage of correct predictions")
+lines(GainTable_RF[,4], col="green", type ="l")
+lines(GainTable_Tree[,4], col="blue", type ="l")
+lines(GainTable_SVM[,4], col="yellow", type ="l")
+grid(NULL, lwd = 1)
+legend("bottomright",
+c("LogReg", "Random Forest", "Decision Tree", "SVM"),
+fill=c("red","green","blue", "yellow"))
+```
